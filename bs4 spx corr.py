@@ -75,7 +75,7 @@ def compile_data():
 
 style.use('dark_background')
 
-def vis():
+def corr():
     df = pd.read_csv('sp500_joined_close.csv')
     corr = df.corr()
     print(corr.head())
@@ -109,4 +109,6 @@ def vis():
 
 #get_data()
 #compile_data()
-vis()
+#corr()
+
+
