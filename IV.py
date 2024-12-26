@@ -9,146 +9,141 @@ from datetime import datetime as dt
 import re
 import matplotlib.pyplot as plt
 
-# Black-Scholes options pricing
-def bsm(S, K, T, v, r, q, type):
-	"""
-	:param v: vol
-	:param type: call or put
-	:return: Black scholes price estimate, option vega
-	"""
-	d1 = (np.log(S/K) + (r-q + 0.5*v**2) *T) / (v*np.sqrt(T))
-	d2 = d1 - v*np.sqrt(T)
-	#vega = S*np.sqrt(T) * ss.norm.cdf(d1)
-	if type == "call":
-		price = S*np.exp(-q*T) * norm.cdf(d1) - K*np.exp(-r*T) * norm.cdf(d2)
-	elif type == "put":
-		price = K*np.exp(-r*T) * norm.cdf(-d2) - S*np.exp(-q*T) * norm.cdf(-d1)
-	return price
+class OptionsPricing:
+    """
+    A class to handle options pricing, implied volatility calculations,
+    and SVI (Stochastic Volatility Inspired) surface fitting.
+    """
 
-# Implied Volatility via Newton's Method
-def imp_vol(S, K, T, r, q, mkt, type):
-	"""
-	:param mkt: market price of option
-	:param type: 'call', 'put'
-	:return: v implied vol
-	"""
-	v = .2  # initial sigma, < results in - warning
+    def __init__(self, spot_price: float, risk_free_rate: float, dividend_yield: float):
+        self.spot_price = spot_price
+        self.risk_free_rate = risk_free_rate
+        self.dividend_yield = dividend_yield
 
-	def model(v):
-		return bsm(S, K, T, v, r, q, type) - mkt
-	return newton(model, v)
+    @staticmethod
+    def black_scholes(S: float, K: float, T: float, v: float, r: float, q: float, option_type: str) -> float:
+        """
+        Calculate the Black-Scholes price for an option.
+        """
+        d1 = (np.log(S / K) + (r - q + 0.5 * v ** 2) * T) / (v * np.sqrt(T))
+        d2 = d1 - v * np.sqrt(T)
 
-# get r, q
-def rq(S, K, T, c, p):
-	"""
-	C(k)-P(k) = S*exp(-q*t) - k*exp(-r*t)
-	:return: risk free rate r, div yield q
-	"""
-	m, b = np.polyfit(K,c-p,1)
-	r = -np.log(-m)/T
-	q = -np.log(b/S)
+        if option_type == "call":
+            return S * np.exp(-q * T) * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+        elif option_type == "put":
+            return K * np.exp(-r * T) * norm.cdf(-d2) - S * np.exp(-q * T) * norm.cdf(-d1)
+        else:
+            raise ValueError("Invalid option type. Use 'call' or 'put'.")
 
-	return r, q
+    def implied_volatility(self, S: float, K: float, T: float, market_price: float, option_type: str) -> float:
+        """
+        Calculate implied volatility using Newton's method.
+        """
+        initial_vol = 0.2
 
-# forward at time T
-def fwd(S, r, q, T):
-	fwd = S * np.exp((r - q) * T)
-	return fwd
+        def objective_function(vol):
+            return self.black_scholes(S, K, T, vol, self.risk_free_rate, self.dividend_yield, option_type) - market_price
 
-# load chain data
-def load_input(input_file):
-	# quotedata header
-	# Ticker (desc), Last, net
-	# Date @ xx:yy: zone
-	# Calls, Last Sale, Net, Bid, Ask, Vol, Open Int, Puts, Last Sale, Net, Bid, Ask, Vol, Open Int
-	# option expression as string: e.g. 'SPX1821L2400'
+        return newton(objective_function, initial_vol)
 
-	with open(input_file, 'r') as a:
-		S = float(a.readline().split(',')[1])
-		t0 = pd.to_datetime(a.readline()[0:11])
-			# t0 = a[0].to_string()
-			# t0 = dt.strptime(t0, '0 %b %d %Y @ %H:%M ET') # start date t0 "today"
-		df = pd.read_csv(input_file, skiprows =2)
-		df = df.iloc[:, :-1] # drop NaN col
+    @staticmethod
+    def calculate_rates(S: float, K: np.ndarray, T: float, call_prices: np.ndarray, put_prices: np.ndarray) -> tuple:
+        """
+        Calculate risk-free rate and dividend yield.
+        """
+        m, b = np.polyfit(K, call_prices - put_prices, 1)
+        r = -np.log(-m) / T
+        q = -np.log(b / S) / T
+        return r, q
 
-		# get contract maturity
-		row = 0	# assuming chain df contains same maturity
-		r1 = df['Calls'].iloc[row].replace(' ','')
-		t1 = maturity(row, r1)
-		T = (t1-t0).days/365
+    @staticmethod
+    def svi(a: float, b: float, p: float, m: float, s: float, K: float, S: float) -> float:
+        """
+        Stochastic Volatility Inspired (SVI) parameterized volatility function.
+        """
+        x = np.log(K / S)
+        return a + b * (p * (x - m) + np.sqrt((x - m) ** 2 + s ** 2))
 
-		df.rename(index=str, columns={"Bid": "Cbid", "Ask": "Cask", "Bid.1": "Pbid","Ask.1": "Pask"}, inplace=True)
-		df['K'] = df.Calls.apply(lambda x: x.split(' ')[2])
-		df['C'] = (df['Cbid'] + df['Cask'])/2
-		df['P'] = (df['Pbid'] + df['Pask'])/2
+    @staticmethod
+    def svi_fit(params: np.ndarray, strikes: np.ndarray, ivs: np.ndarray, S: float) -> float:
+        """
+        Objective function to fit SVI parameters.
+        """
+        svi_variances = np.array([OptionsPricing.svi(*params, K, S) for K in strikes])
+        return np.sum((svi_variances - ivs ** 2) ** 2)
 
-		cols = ['Cbid','C','Cask','K','Pbid','P','Pask']
-		chain = df[cols].apply(pd.to_numeric)
+    def fit_svi(self, strikes: np.ndarray, ivs: np.ndarray) -> np.ndarray:
+        """
+        Fit the SVI parameters to the data.
+        """
+        initial_params = [0.01, 0.1, 0.1, 0.1, 0.1]
+        result = minimize(self.svi_fit, initial_params, args=(strikes, ivs, self.spot_price))
+        return result.x
 
-		return S, T, chain
+    @staticmethod
+    def load_option_chain(file_path: str) -> tuple:
+        """
+        Load and process the option chain data from a file.
+        """
+        with open(file_path, 'r') as file:
+            spot_price = float(file.readline().split(',')[1])
+            current_date = pd.to_datetime(file.readline().strip()[:11])
 
-def maturity(row,r1):
-	"""
-	:param row: row from df
-	:param r1: row as string
-	:return: t1
-	"""
-	p = re.compile("(\d{2})(\w{3})(.*\()(\w{3})(\d{2})(\d{2})")
-	mon = p.match(r1).group(2)
-	yr = str(int(float(p.match(r1).group(1)))+2000)
-	day = str(int(float(p.match(r1).group(6))))
-	mat = mon+day+yr+'16:00 ET'
-	t1 = dt.strptime(mat, '%b%d%Y%H:%M ET')
+            df = pd.read_csv(file_path, skiprows=2).iloc[:, :-1]
+            df.rename(columns={"Bid": "Cbid", "Ask": "Cask", "Bid.1": "Pbid", "Ask.1": "Pask"}, inplace=True)
 
-	return t1
+            maturity_row = df['Calls'].iloc[0]
+            maturity_date = OptionsPricing.parse_maturity(maturity_row)
+            time_to_maturity = (maturity_date - current_date).days / 365
 
-# SVI
-def svi(a, b, p, m, s, K, S):
-	"""
-	args: a -- vert translation (controls overall level of volatility)
-	m -- translates the curve horizontally
-	s -- controls the local curvature around x=m
-	b -- controls the steepness between the two halves
-	p -- rotates the curve.
-	"""
-	x=np.log(K/S)
-	return (a + b * (p * (x - m) + np.sqrt( (x - m)**2 + s**2) ) )
+            df['K'] = df['Calls'].apply(lambda x: float(x.split(' ')[2]))
+            df['C'] = (df['Cbid'] + df['Cask']) / 2
+            df['P'] = (df['Pbid'] + df['Pask']) / 2
 
-def svi_fit(params, Ks, IVs, S):
-	svi_var = np.array([svi(*params, k, S) for k in Ks])
-	return sum(np.power(svi_var - IVs**2,2))
+            return spot_price, time_to_maturity, df
 
-### Main
-S, T, chain = load_input('./quotedata.dat')
-r, q = rq(S, np.array(chain.K), T, np.array(chain['C']), np.array(chain['P']))
-print('r: %0.4f q: %0.4f' %(r, q))
-									# imp_vol(S, K, T, r, q, mkt, type)
-chain['cvol'] = chain.apply(lambda x: imp_vol(S, x['K'], T, r, q, x['C'], 'call'), axis=1)
-chain['pvol'] = chain.apply(lambda x: imp_vol(S, x['K'], T, r, q, x['P'], 'put'), axis=1)
-chain['IV'] = (chain['cvol'] + chain['pvol'])/2
-print(chain.head()) # check df
+    @staticmethod
+    def parse_maturity(option_string: str) -> dt:
+        """
+        Parse the maturity date from the option string.
+        """
+        pattern = re.compile(r"(\d{2})(\w{3})(\d{2})")
+        match = pattern.search(option_string)
 
-# svi calibration based on parameter bounds, Gatheral
-svi_init = [.01, 0.1, 0.1, .1, 0.1]
+        if not match:
+            raise ValueError("Invalid option string format.")
 
-params = minimize(svi_fit, svi_init,
-				args=(np.array(chain['K']), np.array(chain['IV']), S)).x
-print('\na,b,p,m,s:',params)
-fit = [np.sqrt(svi(*params, ks,S)) for ks in chain['K']]
+        day, month, year = match.groups()
+        year = str(int(year) + 2000)
+        return dt.strptime(f"{month} {day} {year} 16:00", '%b %d %Y %H:%M')
 
-# error check
-delta = pd.Series(chain['IV']-fit)
-print('\nMAE: %f' % delta.mad())
-print('RMSE: %f' % delta.std())
+# Main Execution
+if __name__ == "__main__":
+    spot_price, T, chain = OptionsPricing.load_option_chain('./quotedata.dat')
 
-#test OTM
-S1 = 2684.79
-v = np.sqrt(svi(*params, S1, S))
-theo = bsm(S, S1, T, v, r, q, 'call')
-print('\nTheoretical price:\nZ18',S1,'Calls midprice\t',theo)
+    pricing = OptionsPricing(spot_price, 0.0, 0.0)
+    r, q = OptionsPricing.calculate_rates(spot_price, chain['K'], T, chain['C'], chain['P'])
 
-plt.plot(chain['K'],fit, label='fit: a%5.3f, b=%5.3f,p=%5.3f,m=%5.3f,s=%5.3f' % tuple(params))
-plt.xlabel('K')
-plt.ylabel('IV')
-plt.legend()
-plt.show()
+    chain['cvol'] = chain.apply(lambda row: pricing.implied_volatility(spot_price, row['K'], T, row['C'], 'call'), axis=1)
+    chain['pvol'] = chain.apply(lambda row: pricing.implied_volatility(spot_price, row['K'], T, row['P'], 'put'), axis=1)
+    chain['IV'] = (chain['cvol'] + chain['pvol']) / 2
+
+    params = pricing.fit_svi(chain['K'], chain['IV'])
+
+    fit_ivs = np.sqrt([OptionsPricing.svi(*params, K, spot_price) for K in chain['K']])
+
+    mae = np.mean(np.abs(chain['IV'] - fit_ivs))
+    rmse = np.sqrt(np.mean((chain['IV'] - fit_ivs) ** 2))
+
+    print(f"Risk-Free Rate: {r:.4f}, Dividend Yield: {q:.4f}")
+    print(f"Fitted SVI Parameters: {params}")
+    print(f"Mean Absolute Error (MAE): {mae:.4f}")
+    print(f"Root Mean Squared Error (RMSE): {rmse:.4f}")
+
+    plt.plot(chain['K'], chain['IV'], label="Market IV", linestyle='--')
+    plt.plot(chain['K'], fit_ivs, label="Fitted IV", linestyle='-')
+    plt.xlabel("Strike Price")
+    plt.ylabel("Implied Volatility")
+    plt.legend()
+    plt.title("Implied Volatility Surface Fit")
+    plt.show()
