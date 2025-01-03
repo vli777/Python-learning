@@ -1,4 +1,3 @@
-#VL 1217.2 IB EQD trading technical assessment
 #SVI Implied Volatility Surface
 
 import numpy as np
